@@ -1,0 +1,510 @@
+[WHSWorkExecuteMode(WHSWorkExecuteMode::ReturnOrderLite)]
+internal final class Vuo_WHSWorkExecuteDisplay_ReturnOrder_Lite extends WHSWorkExecuteDisplay
+{
+
+    public container displayForm(container _con, str _buttonClicked = '')
+    {
+        container                   ret = conNull();
+        container                   con = _con;
+        int                         hasError = 0;
+        WHSRFPassthrough            fieldValues = new WHSRFPassthrough(Types::String, Types::String);
+        WHSWorkExecuteDisplay       workExecuteDisplay = WHSWorkExecuteDisplay::construct(mode);
+        container                   tmpFieldValues;
+        boolean                     complete;
+        boolean                     recall;
+        WHSWorkCreateReturnOrder    workCreateReturnOrder;
+        SalesTable                  salesTable;
+        SalesLine                   salesLine,salesLineReceive;
+        WHSWorkBuildId              workBuildId;
+        WhsWorkExecute              workExecute = WhsWorkExecute::construct();
+        WHSMenuItemName             menuItem;
+        WHSRFPassthrough            tmpMap;
+        container                   tmpPass;
+        int                         tmpStep;
+        InventSerialId              serialId;
+        boolean                     salesSerialProcess;
+        ReturnItemNum               returnItemNum;
+        WHSDispositionCode          dispositionCode;
+        InventDim                   receiptInventDimId;
+        ReturnExpectedRetQty        returnQuantity;
+
+        pass = WHSRFPassthrough::create(conPeek(_con, 2));
+
+        hasError = this.hasError(_con);
+
+        //Todo: validation on serialized items
+        //salesSerialProcess = InventTable::find(pass.lookupStr(#ItemId)).isSalesProcessSerialActive();
+
+        //Todo: Do we need to process the button clicked
+        this.processButtonClicked(_buttonClicked);
+
+        WHSRFMenuItemTable menuItemTable = WHSRFMenuItemTable::find(pass.lookupStr(#MenuItem));
+        
+        boolean continueToNextStep;
+
+        switch (step)
+        {
+            case 0:
+                if (pass.exists(#WorkComplete))
+                {
+                    ret = this.addErrorLabel(ret, "@WAX866", WHSRFColorText::Success);
+                    pass.remove(#WorkComplete);
+
+                    ret = this.addClusterMessages(ret);
+                }
+
+               
+                ret = this.buildReturnOrder(ret);
+                step = 1;
+                break;
+
+            case 1:
+                if (hasError)
+                {
+                    con = this.removeErrorMessages(con);
+                }
+
+                [con, tmpFieldValues] = WHSRFControlData::processDataWithCallback(this, con, pass);
+                fieldValues = WHSRFPassthrough::create(tmpFieldValues);
+                pass = this.combineMaps(pass, fieldValues);
+                hasError = this.hasError(con);
+
+                if (hasError)
+                {
+                    ret = con;
+                    break;
+                }
+
+                //Todo
+                //if (WHSReturnOrderGenerateLPAfterPartialRecFlight::instance().isEnabled())
+                //{
+                  //  this.populateGeneratedLicensePlateId(fieldValues);
+                //}
+
+                ret += this.buildReturnOrder(ret);
+                [ret, complete] = this.processFieldValues(ret, fieldValues);
+                step = 2;
+                break;
+
+            case 2:
+
+                if (hasError)
+                {
+                    con = conDel(con, 3, 1);
+                }
+
+                [con, tmpFieldValues] = WHSRFControlData::processDataWithCallback(this, con, pass);
+                fieldValues = WHSRFPassthrough::create(tmpFieldValues);
+                pass = this.combineMaps(pass, fieldValues);
+
+                // Need to have license plate generation after combining the maps, so item ID is present in the pass.
+                this.populateGeneratedLicensePlateId(fieldValues);
+
+                hasError = this.hasError(con);
+
+                if (hasError)
+                {
+                    ret = con;
+                    break;
+                }
+
+                if (pass.exists(#ItemId)
+                    && pass.lookup(#ItemId) != ''
+                    )
+                {
+                    salesTable  = SalesTable::findReturnItemNum(pass.lookup(#RMANum));
+
+                    this.checkDispositionAction(salesTable);
+
+                    //Todo - this check is not good enough for item var and needs to be dealt with.
+                    //Make more specific for dimensions
+                    select salesLine
+                        where salesLine.SalesId         == salesTable.SalesId
+                            && salesLine.ItemId         == pass.lookup(#ItemId)
+                            && salesLine.ReturnStatus   == ReturnStatusLine::Awaiting
+                            && salesLine.ExpectedRetQty <  0;
+                    {
+                        //if (InventSite::allowReceiptAtOtherWarehouse(salesLine.inventDim().InventLocationId, pass.lookup(#InventLocationId)))
+                        //{
+                        //    break;
+                        //}
+
+                        salesLineReceive = salesLine;
+                        returnQuantity = salesLine.ExpectedRetQty;
+                        ret = this.addExpectedReturnQty(ret,returnQuantity);
+
+                    }
+
+                    if (salesLine.RecId == 0)
+                    {
+                        throw error("@WAX1239");
+                    }
+                }
+
+                //Todo Check if this is needed
+                ret += this.buildReturnOrder(ret);
+
+                [ret, complete] = this.processFieldValues(ret, fieldValues);
+
+                if((pass.exists(#ItemId) && pass.lookup(#ItemId) != '') &&
+                    (pass.exists(#Qty) && pass.lookup(#Qty) != '') &&
+                    (pass.exists("Unit") && pass.lookup("Unit") != ''))
+                {
+
+                }
+
+                if (complete && salesLine) //&& this.isWorkCreationDataEntryComplete() && pass.hasValue(#UOM))
+                {
+                    //do magic
+                    step = 1;
+                    //Todo GetQty, dispo, default receipt location
+                    dispositionCode = "RMA Credit";
+                    receiptInventDimId = InventDim::find(salesLineReceive.InventDimId);
+                    receiptInventDimId.wmsLocationId = "001";
+                    receiptInventDimId = InventDim::findorCreate(receiptInventDimId);
+
+                    this.processArrivalJournal(salesLineReceive,1,dispositionCode,receiptInventDimId.inventDimId);
+
+                }
+        }
+
+        ret = this.updateModeStepPass(ret, mode, step, pass);
+
+        if (step > 2)
+        {
+            ret = this.addButtons(ret);
+        }
+        ret = this.addCancelButton(ret, 1, true);
+
+        return ret;
+    }
+
+    public boolean processControl(WhsControl _control, str _value)
+    {
+        
+        switch (true)
+        {
+            case _control is WhsControlItemId:
+                return this.processItemIdForReturnOrderReceiving(_control);
+        }
+
+        return super(_control, _value);
+    }
+
+    private void populateGeneratedLicensePlateId(WHSRFPassthrough _fieldValues)
+    {
+        if (pass.exists(#ItemId)
+            && !pass.parmLicensePlateId()
+            && WHSRFMenuItemTable::find(pass.lookup(#MenuItem)).GenerateLP)
+        {
+            WHSLicensePlateId licensePlateId = WHSLicensePlate::generateLicensePlateId(pass.lookup(#ItemId),pass.lookupStr(#SelectedValueUOM));
+
+            pass.insert(#LicensePlateId, licensePlateId);
+            _fieldValues.insert(#LicensePlateId, licensePlateId);
+        }
+    }
+
+    public void checkDispositionAction(SalesTable    _salesTable)
+    {
+        SalesLine                   creditOnlySalesLine;
+        ReturnDispositionCode       returnDispositionCode;
+
+        while select creditOnlySalesLine
+            where creditOnlySalesLine.SalesId                 == _salesTable.SalesId
+                && creditOnlySalesLine.ItemId                 == pass.lookup(#ItemId)
+                && creditOnlySalesLine.ReturnStatus           == ReturnStatusLine::Awaiting
+            outer join RecId, DispositionAction, DispositionCodeId from returnDispositionCode
+                where returnDispositionCode.DispositionCodeId == creditOnlySalesLine.ReturnDispositionCodeId
+        {
+            if (returnDispositionCode.RecId == 0
+                || returnDispositionCode.DispositionAction != DispositionAction::CreditOnly)
+            {
+                break;
+            }
+        }
+
+        if (!creditOnlySalesLine)
+        {
+            throw error("@WAX4783");
+        }
+    }
+
+    protected void processButtonClicked(str _buttonClicked)
+    {
+
+        //Todo
+        WMSLocationId  newSuggestedPickPutLocationId;
+        WhsWorkExecute workExecute = WhsWorkExecute::construct();
+
+        if (_buttonClicked == #RFException)          // Exception
+        {
+            step = #ReceivingExceptionStep1;
+        }
+        else if (_buttonClicked == #RFOverride)      // Override
+        {
+            step = #OverrideStep1;
+        }
+        else if (_buttonClicked == #RFFull)      // Full (Split)
+        {
+            step = #SplitWork;
+        }
+        else if (_buttonClicked == #RFNoLocation)      // Suggest Location (NoLocation)
+        {
+            //workLine = WHSWorkLine::find(pass.lookup(#WorkId), pass.parmLineNum());
+            //Set excludeLocationId = new Set(Types::String);
+
+            //if (pass.exists(#ExcludedLocations))
+            //{
+            //    excludeLocationId = this.buildLocationListFromStr(pass.lookup(#ExcludedLocations));
+            //}
+            //else
+            //{
+            //    excludeLocationId = this.buildLocationListFromStr(workLine.wmsLocationId);
+            //}
+
+            //container tmpCon;
+
+            //[newSuggestedPickPutLocationId, tmpCon] = workExecute.findNewLocation(workLine, excludeLocationId);
+            //excludeLocationId = Set::create(tmpCon);
+            //pass.insert(#SuggestLocation, 1);
+            //pass.insert(#ExcludedLocations, this.buildLocationListFromSet(excludeLocationId));
+            //if (pass.exists(#PrevStep))
+            //{
+            //    step = pass.lookup(#PrevStep);
+            //}
+            //else
+            //{
+            //    pass.insert(#NoValidation, '1');
+            //}
+        }
+        else if (_buttonClicked == #RFSplitPut)
+        {
+            //this.validateSplitPutAllowed();
+            //step = #SplitPutWork;
+        }
+
+        //suggestedPickPutLocationId = newSuggestedPickPutLocationId;
+    }
+
+    public container buildReturnOrder(container _con)
+    {
+        container ret = _con;
+
+        WHSRFMenuItemTable menuItemTable = WHSRFMenuItemTable::find(pass.parmMenuItem());
+
+        ret += [this.buildControl(#RFLabel, "@SYS105841", menuItemTable.rfTitle, 1, '', #WHSRFUndefinedDataType, '', 0)];
+
+        if (pass.exists(#RMANum) && pass.lookup(#RMANum) != '')
+        {
+            ExtendedTypeId extendedTypeId = extendedTypeNum(SalesReturnItemNum);
+            ret += [this.buildControl(#RFText, #RMANum, "@WAX3259", 1, pass.lookup(#RMANum), extendedTypeId, '', 0, 0)];
+            ret += [this.buildControl(#RFText, #ItemId, "@SYS14428", 1, pass.lookupStr(#ItemId), extendedTypeNum(InventInventItemSearchItem), '', 0)];
+
+            if (pass.exists(#ItemId))
+            {
+                WHSInventTable whsInventTable = WHSInventTable::find(pass.lookup(#ItemId));
+                InventTable inventTable       = InventTable::find(pass.lookup(#ItemId));
+                SalesTable salesTable         = SalesTable::findReturnItemNum(pass.lookup(#RMANum));
+
+                //Todo
+                //InventDim inventDim           = this.getReturnOrderLineInventDim(salesTable, inventTable);
+
+                if (whsInventTable.rfDescription1)
+                {
+                    ret += [this.buildControl(#RFLabel, #RFDescription1, strFmt("\t        %1", whsInventTable.rfDescription1), 1, '', #WHSRFUndefinedDataType, '', 0, false, "", WHSRFColorText::Default, extendedTypeNum(WHSRFDescription1))];
+                }
+                else
+                {
+                    ret += [this.buildControl(#RFLabel, #RFDescription1, strFmt("\t        %1", inventTable.productNameWhsWorkExecute()), 1, '', #WHSRFUndefinedDataType, '', 0, false, "", WHSRFColorText::Default, extendedTypeNum(EcoResProductName))];
+                }
+
+                if (whsInventTable.rfDescription2)
+                {
+                    ret += [this.buildControl(#RFLabel, #RFDescription2, strFmt("\t        %1", whsInventTable.rfDescription2), 1, '', #WHSRFUndefinedDataType, '', 0, false, "", WHSRFColorText::Default, extendedTypeNum(WHSRFDescription2))];
+                }
+                //Todo
+                //ret = this.buildProductDimensionsFromInventDim(ret, pass.lookup(#ItemId), inventDim);
+            }
+
+            //ToDo LP logic
+            WHSLicensePlateId licensePlateId = menuItemTable.GenerateLP ? pass.parmLicensePlateId() : '';
+            boolean enableLicensePlateIdControl = !(menuItemTable.GenerateLP && licensePlateId);
+
+            ret += [this.buildControl(#RFText, #LicensePlateId, "@WAX1198", 1, licensePlateId, #WHSRFUndefinedDataType, '', 0, enableLicensePlateIdControl)];
+
+            //if (menuItemTable.DisplayContainerTypeCode)
+            //{
+              //  ret = this.buildContainerType(ret, pass.lookupStr(#ContainerType), true, true);
+            //}
+
+            ret += [this.buildControl(#RFText, #Qty, "@SYS105177", 1, '', extendedTypeNum(Qty), '', 0)];
+            ret  = this.buildUOM(ret, '', false, false, false, pass.lookupStr(#SelectedValueUOM));
+            
+            //if (this.isCatchWeightControlElligible()
+            //&&	WHSInventTable::shouldCaptureAggregateWeight(pass.lookup(#ItemId)))
+            //{
+              //  ret += [this.buildControl(#RFText, WHSWorkExecuteDisplayCatchWeightControls::CatchWeight, "@WAX:Weight", 1, pass.lookupStr(WHSWorkExecuteDisplayCatchWeightControls::CatchWeight), extendedTypeNum(Weight), '', 0)];
+            //}
+
+            ret  = this.buildDispositon(ret, pass.lookupStr(#Disposition), true, false);
+        }
+        else
+        {
+            ExtendedTypeId extendedTypeId = extendedTypeNum(SalesReturnItemNum);
+            ret += [this.buildControl(#RFText, #RMANum, "@WAX3259", 1, '', extendedTypeId, '', 0)];
+        }
+
+        ret += [this.buildControl(#RFButton, #RFOK, "@SYS5473", 1, '', #WHSRFUndefinedDataType, '', 1)];
+
+        return ret;
+    }
+
+    container processFieldValues(container _con, WHSRFPassthrough _fieldValues)
+    {
+
+        //We can implement this more efficiently.
+        boolean   complete      = true;
+        container con           = _con;
+        
+
+
+        //WHSWorkType workLineWorkType;
+        //if (!workLine)
+        //{
+        //    workLineWorkType = WHSWorkLine::find(pass.lookupStr(#WorkId), pass.parmLineNum()).WorkType;
+        //}
+        //else
+        //{
+        //    workLineWorkType = workLine.WorkType;
+        //}
+
+        int length = conLen(con);
+        for (int i = 1; i <= length; ++i)
+        {
+            container subCon = conPeek(con, i);
+            str controlType = conPeek(subCon, #controlType);
+            str name;
+            int enabled;
+
+            if (controlType == #RFText      ||
+                controlType == #RFPassword)
+            {
+                name = conPeek(subCon, #name);
+
+                if (_fieldValues.exists(name))
+                {
+                    con = conPoke(con, i, conPoke(subCon, #data, _fieldValues.lookup(name)));
+
+                    str value = _fieldValues.lookup(name);
+                    enabled = conPeek(subCon, #enabled);
+
+                    if (!value && enabled)
+                    {
+                        if (name == #GtdId_RU)
+                            //TodO && WhsInvent::isGTDNumberOptional(pass.parmItemId()))
+                        {
+                            continue;
+                        }
+                        
+                        str buttonClicked = this.getButtonClicked(con);
+                        //Todo
+                        //if (!WHSRFAutoConfirm::isPieceByPieceConfirmationEnabled(pass.lookupStr(#MenuItem), workLineWorkType)
+                        //    || (buttonClicked != #RFDone)
+                        //    || (buttonClicked == #RFDone
+                        //        && name != #ProductConfirmation
+                        //        && name != WHSWorkExecuteDisplayPieceByPieceControls::PieceByPieceConfirmation))
+                        //{
+                        //    complete = false;
+                        //}
+                    }
+                }
+            }
+            else if (controlType == #RFComboBox && conPeek(subCon, #data) == '' && conPeek(subCon, #selected) == '')
+            {
+                name    = conPeek(subCon, #name);
+                enabled = conPeek(subCon, #enabled);
+
+                if (name != #Disposition
+                    &&  name != #InventoryStatus
+                    &&  name != #ContainerType
+                    &&  enabled)
+                {
+                    complete = false;
+                }
+            }
+            else if (controlType == #RFFastValidationIds && conPeek(subCon, #data) == '')
+            {
+                complete = false;
+            }
+        }
+        
+        return [con, complete];
+    }
+
+
+    private void processArrivalJournal(
+        SalesLine           _salesLine,
+        InventHandlingQty	_qty,
+        WHSDispositionCode _dispositionCode,
+        InventDimId         _inventDimId)
+    {
+        WMSJournalCheckPostReception    journalCheckPost;
+        WMSJournalTable                 journalTable;
+        WMSJournalTrans                 journalTrans;
+
+        ttsbegin;
+
+        // Create the journal header
+        journalTable.initFromWMSJournalName(WMSJournalName::find(WHSParameters::find().DefaultReturnJournal));
+        journalTable.InventTransType        = InventTransType::Sales;
+        journalTable.VendAccount            = _salesLine.CustAccount;
+        journalTable.InventTransRefId       = _salesLine.SalesId;
+        journalTable.ReturnItemNum          = SalesTable::find(_salesLine.SalesId).ReturnItemNum;
+        journalTable.CheckPickingLocation   = NoYes::Yes;
+        journalTable.PalletTransports       = NoYes::Yes;
+        journalTable.CheckBufferLocation    = NoYes::Yes;
+        journalTable.InventDimId            = InventDim::inventDimIdBlank();
+        journalTable.NumOfLines             = 1;
+        journalTable.insert();
+
+        // Create the journal line
+        ++journalTrans.LineNum;
+        journalTrans.initFromWMSJournalTable(journalTable);
+        journalTrans.initValue();
+        journalTrans.IsReturnOrder              = 1;
+        journalTrans.ReturnDispositionCodeId    = WHSDispositionTable::find(_dispositionCode).ReturnDispositionCodeId;
+        journalTrans.ItemId                     = _salesLine.ItemId;
+        journalTrans.Qty                        = _qty;
+        //journalTrans.PdsCWQty                   = _cwQty;
+        journalTrans.InventTransId              = _salesLine.InventTransId;
+        journalTrans.PalletTransports           = NoYes::No;
+        journalTrans.CheckPickingLocation       = NoYes::No;
+        journalTrans.CheckBufferLocation        = NoYes::No;
+        journalTrans.InventDimId                = _inventDimId;
+        journalTrans.insert();
+
+        // Post the Arrival Journal
+        journalCheckPost = WMSJournalCheckPostReception::construct();
+        journalCheckPost.parmAutoBlock(true);
+        journalCheckPost.parmShowInfoResult(true);
+        journalCheckPost.parmThrowCheckFailed(true);
+        journalCheckPost.parmJournalCheckPostType(JournalCheckPostType::Post);
+        journalCheckPost.parmJournalTableId(journalTable.TableId);
+        journalCheckPost.parmJournalId(journalTable.JournalId);
+        journalCheckPost.runOperation();
+
+        ttscommit;
+
+        //return journalTable.JournalId;
+    }
+
+    public container addExpectedReturnQty(container _con,ReturnExpectedRetQty _qty)
+    {
+        container ret         = _con;
+        str       expectedQty = int2Str(abs(_qty));
+
+        ret += [this.buildControl(#RFLabel, "ExpectedQty", "ExpectedQty", 1, expectedQty, #WHSRFUndefinedDataType, '', 0)];
+
+        return ret;
+    }
+}
