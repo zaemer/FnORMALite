@@ -1,0 +1,34 @@
+[ExtensionOf(tableStr(WHSRFMenuItemTable))]
+internal final class Vuo_WHSRFMenuItemTable_Extension
+{
+    public static WHSWorkExecuteMode getWHSWorkExecuteMode(WHSRFMenuItemTable _menuItem)
+    {
+        //This is bad technical debt.
+        //This is a non elligant way to get the work execute mode. There is logic lower in the stack to find
+        //The value based on enums - that would be preferrable.
+
+        WHSWorkExecuteMode mode;
+
+        mode = next getWHSWorkExecuteMode(_menuItem);
+
+        if(!mode)
+        {
+            //Gross hard coding
+            switch (_menuItem.WorkCreationProcess)
+            {
+                case WHSWorkCreationProcess::ReturnOrderLite:
+                    mode = WHSWorkExecuteMode::ReturnOrderLite;
+                    break;
+                
+                //Throw error here
+                //default:
+                    
+                    //break;
+                    
+            }
+        }
+
+        return mode;
+    }
+
+}
